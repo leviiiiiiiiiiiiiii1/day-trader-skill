@@ -124,15 +124,41 @@ touchEmaDn = high >= ef - tol and high <= es + rProf * atr
 touchZonaDn = zonaVivaDn and high >= impDnZone - tol and high <= impDnZone + rProf * atr
 touchDn = rRef == "EMA" ? touchEmaDn : rRef == "Zona" ? touchZonaDn : (touchEmaDn or touchZonaDn)
 
-var int toqueUpBar = na
-if touchUp and trendUp
-    toqueUpBar := bar_index
-var int toqueDnBar = na
-if touchDn and trendDn
-    toqueDnBar := bar_index
+// registra o candle de cada referencia tocada, para medir confluencia
+var int toqueEmaUpBar = na
+var int toqueZonaUpBar = na
+var int toqueEmaDnBar = na
+var int toqueZonaDnBar = na
+
+if touchEmaUp and trendUp
+    toqueEmaUpBar := bar_index
+if touchZonaUp and trendUp
+    toqueZonaUpBar := bar_index
+if touchEmaDn and trendDn
+    toqueEmaDnBar := bar_index
+if touchZonaDn and trendDn
+    toqueZonaDnBar := bar_index
 
 cancelUp = close < es - rCancel * atr
 cancelDn = close > es + rCancel * atr
+
+if cancelUp
+    toqueEmaUpBar := na
+    toqueZonaUpBar := na
+if cancelDn
+    toqueEmaDnBar := na
+    toqueZonaDnBar := na
+
+// confluencia: as duas referencias tocadas dentro da janela rConflu
+conflUp = not na(toqueEmaUpBar) and not na(toqueZonaUpBar) and math.abs(toqueEmaUpBar - toqueZonaUpBar) <= rConflu
+conflDn = not na(toqueEmaDnBar) and not na(toqueZonaDnBar) and math.abs(toqueEmaDnBar - toqueZonaDnBar) <= rConflu
+
+var int toqueUpBar = na
+var int toqueDnBar = na
+if touchUp and trendUp
+    toqueUpBar := bar_index
+if touchDn and trendDn
+    toqueDnBar := bar_index
 if cancelUp
     toqueUpBar := na
 if cancelDn
@@ -216,8 +242,8 @@ cooldownOk = na(ultimoSinalBar) or (bar_index - ultimoSinalBar) > fCooldown
 // ============================================================================
 // 7. GRADE DO SINAL (hipotese a ser testada, ver README)
 // ============================================================================
-gradeUp = (touchEmaUp and touchZonaUp and engulfUp) ? "A" : ((engulfUp or forcaTrigUp) and (touchEmaUp or touchZonaUp)) ? "B" : "C"
-gradeDn = (touchEmaDn and touchZonaDn and engulfDn) ? "A" : ((engulfDn or forcaTrigDn) and (touchEmaDn or touchZonaDn)) ? "B" : "C"
+gradeUp = (conflUp and engulfUp) ? "A" : ((engulfUp or forcaTrigUp) and (touchEmaUp or touchZonaUp)) ? "B" : "C"
+gradeDn = (conflDn and engulfDn) ? "A" : ((engulfDn or forcaTrigDn) and (touchEmaDn or touchZonaDn)) ? "B" : "C"
 
 rankUp = gradeUp == "A" ? 3 : gradeUp == "B" ? 2 : 1
 rankDn = gradeDn == "A" ? 3 : gradeDn == "B" ? 2 : 1
