@@ -1,0 +1,304 @@
+//@version=5
+// ============================================================================
+//  FLUXO NA VOLTA - Indicador de entrada (gatilho)
+//  Sintese das estrategias "Volta na Media" (EMA 20/50) e "Mestre do Fluxo"
+//  (fluxo de velas, filtro M5, candle de forca, zona no corpo).
+//
+//  Leia pine/README.md antes de usar. Este indicador NAO envia ordem, NAO
+//  calcula payout e NAO promete resultado. Ele marca no grafico onde as regras
+//  se alinham e mostra, no painel, qual camada esta bloqueando a entrada.
+//
+//  Sinais aparecem somente em candle FECHADO (barstate.isconfirmed).
+// ============================================================================
+indicator("Fluxo na Volta | Gatilho M1", "FNV", overlay = true, max_labels_count = 500, max_lines_count = 200, max_bars_back = 500)
+
+// ============================================================================
+// 1. NUCLEO: medias e volatilidade
+// ============================================================================
+g1 = "1. Nucleo"
+srcU     = input.source(close, "Fonte",                          group = g1)
+lenFast  = input.int(20,  "EMA rapida",        minval = 2,       group = g1)
+lenSlow  = input.int(50,  "EMA lenta",         minval = 3,       group = g1)
+lenAtr   = input.int(14,  "ATR",               minval = 1,       group = g1)
+warmup   = input.int(250, "Aquecimento (candles)", minval = 50,  group = g1, tooltip = "Antes disso nenhum sinal e emitido: as EMAs ainda carregam a semente.")
+
+ef  = ta.ema(srcU, lenFast)
+es  = ta.ema(srcU, lenSlow)
+atr = ta.atr(lenAtr)
+atrOk = not na(atr) and atr > 0
+ready = atrOk and bar_index >= warmup
+
+// ============================================================================
+// 2. TENDENCIA (Video 1, com leitura numerica)
+// ============================================================================
+g2 = "2. Tendencia"
+fSep      = input.float(0.10,  "Separacao minima (ATR)",              step = 0.01,  group = g2)
+fSlopeK   = input.int(5,       "Janela de inclinacao (candles)",      minval = 1,   group = g2)
+fSlopeF   = input.float(0.02,  "Inclinacao minima EMA rapida (ATR/candle)", step = 0.005, group = g2)
+fSlopeS   = input.float(0.01,  "Inclinacao minima EMA lenta (ATR/candle)",  step = 0.005, group = g2)
+fNoCross  = input.int(10,      "Sem cruzamento nos ultimos (candles)", minval = 1,  group = g2)
+fMaxCross = input.int(1,       "Maximo de cruzamentos em 30 candles",  minval = 0,  group = g2)
+fPriceOK  = input.bool(true,   "Exigir preco do lado certo da EMA lenta",           group = g2)
+fTrendPer = input.int(3,       "Persistencia da tendencia (candles)", minval = 1,   group = g2)
+
+sepOK   = (ef - es) > fSep * atr
+slopeUp = ((ef - ef[fSlopeK]) / fSlopeK) > fSlopeF * atr and ((es - es[fSlopeK]) / fSlopeK) > fSlopeS * atr
+slopeDn = ((ef[fSlopeK] - ef) / fSlopeK) > fSlopeF * atr and ((es[fSlopeK] - es) / fSlopeK) > fSlopeS * atr
+
+crossUp = ta.crossover(ef, es)
+crossDn = ta.crossunder(ef, es)
+crossAny = crossUp or crossDn
+crosses30 = math.sum(crossAny ? 1 : 0, 30)
+noRecent  = math.sum(crossAny ? 1 : 0, fNoCross) == 0
+
+priceUp = not fPriceOK or close > es
+priceDn = not fPriceOK or close < es
+
+trendUpRaw = sepOK and slopeUp and crosses30 <= fMaxCross and noRecent and priceUp and atrOk
+trendDnRaw = (es - ef) > fSep * atr and slopeDn and crosses30 <= fMaxCross and noRecent and priceDn and atrOk
+
+persistUp = math.sum(trendUpRaw ? 1 : 0, fTrendPer) == fTrendPer
+persistDn = math.sum(trendDnRaw ? 1 : 0, fTrendPer) == fTrendPer
+
+trendUp = ready and trendUpRaw and persistUp
+trendDn = ready and trendDnRaw and persistDn
+
+// ============================================================================
+// 3. IMPULSO: candle de forca e extensao da media (o cao correu)
+// ============================================================================
+g3 = "3. Impulso"
+iExtWin   = input.int(10,     "Janela da extensao (candles)",         minval = 1,   group = g3)
+iExtMin   = input.float(0.30, "Afastamento minimo da EMA (ATR)",      step = 0.05,  group = g3)
+iForcaAtr = input.float(0.80, "Candle de forca: corpo minimo (ATR)",  step = 0.05,  group = g3)
+iForcaRng = input.float(0.60, "Candle de forca: corpo / range",       step = 0.05,  group = g3)
+iMinRange = input.float(0.15, "Range minimo de qualquer candle (ATR)", step = 0.05, group = g3)
+iSeqCor   = input.bool(true,  "Candle de forca exige mesma cor do anterior",        group = g3)
+iChase    = input.float(1.00, "Nao perseguir: distancia maxima da EMA (ATR)", step = 0.10, group = g3)
+iZoneWin  = input.int(10,     "Validade da zona (candles)",           minval = 1,   group = g3)
+
+body = math.abs(close - open)
+rng  = high - low
+bodyPrev = math.abs(close[1] - open[1])
+
+forcaUp = body >= iForcaAtr * atr and body >= iForcaRng * rng and rng >= iMinRange * atr and close > open and close > high[1] and (not iSeqCor or close[1] > open[1])
+forcaDn = body >= iForcaAtr * atr and body >= iForcaRng * rng and rng >= iMinRange * atr and close < open and close < low[1]  and (not iSeqCor or close[1] < open[1])
+
+var int impUpBar = na
+var float impUpZone = na
+if forcaUp
+    impUpBar  := bar_index
+    impUpZone := math.max(open, close)
+
+var int impDnBar = na
+var float impDnZone = na
+if forcaDn
+    impDnBar  := bar_index
+    impDnZone := math.min(open, close)
+
+extUp = ta.highest(high - ef, iExtWin) >= iExtMin * atr
+extDn = ta.lowest(low - ef, iExtWin)  <= -iExtMin * atr
+
+zonaVivaUp = not na(impUpBar) and (bar_index - impUpBar) <= iZoneWin and not na(impUpZone)
+zonaVivaDn = not na(impDnBar) and (bar_index - impDnBar) <= iZoneWin and not na(impDnZone)
+
+impulsoUp = extUp or zonaVivaUp
+impulsoDn = extDn or zonaVivaDn
+
+// ============================================================================
+// 4. RETORNO: o preco voltou a referencia
+// ============================================================================
+g4 = "4. Retorno"
+rRef      = input.string("EMA + Zona", "Referencia da volta", options = ["EMA", "Zona", "EMA + Zona"], group = g4)
+rTol      = input.float(0.02, "Tolerancia do toque (ATR)",       step = 0.01, group = g4)
+rProf     = input.float(0.25, "Nao afundar sob a referencia (ATR)", step = 0.05, group = g4)
+rCancel   = input.float(0.10, "Cancelar se furar (ATR)",          step = 0.05, group = g4)
+rConflu   = input.int(3,      "Janela da confluencia (candles)",  minval = 1,  group = g4)
+
+tol = math.max(rTol * atr, 0.0002 * close)
+
+touchEmaUp = low <= ef + tol and low >= es - rProf * atr
+touchZonaUp = zonaVivaUp and low <= impUpZone + tol and low >= impUpZone - rProf * atr
+touchUp = rRef == "EMA" ? touchEmaUp : rRef == "Zona" ? touchZonaUp : (touchEmaUp or touchZonaUp)
+
+touchEmaDn = high >= ef - tol and high <= es + rProf * atr
+touchZonaDn = zonaVivaDn and high >= impDnZone - tol and high <= impDnZone + rProf * atr
+touchDn = rRef == "EMA" ? touchEmaDn : rRef == "Zona" ? touchZonaDn : (touchEmaDn or touchZonaDn)
+
+var int toqueUpBar = na
+if touchUp and trendUp
+    toqueUpBar := bar_index
+var int toqueDnBar = na
+if touchDn and trendDn
+    toqueDnBar := bar_index
+
+cancelUp = close < es - rCancel * atr
+cancelDn = close > es + rCancel * atr
+if cancelUp
+    toqueUpBar := na
+if cancelDn
+    toqueDnBar := na
+
+chaseBlockUp = (close - ef) > iChase * atr
+chaseBlockDn = (ef - close) > iChase * atr
+
+// ============================================================================
+// 5. GATILHO: rejeicao na referencia
+// ============================================================================
+g5 = "5. Gatilho"
+tMode     = input.string("Engolfo + Forca", "Padrao aceito", options = ["Engolfo", "Forca", "Martelo", "Engolfo + Forca", "Todos"], group = g5)
+tWin      = input.int(3,      "Janela do gatilho apos o toque (candles)", minval = 1, group = g5)
+tWickBody = input.float(2.0,  "Martelo: pavio / corpo",              step = 0.1, group = g5)
+tWickAtr  = input.float(0.25, "Martelo: pavio minimo (ATR)",         step = 0.05, group = g5)
+tBodyRng  = input.float(0.35, "Martelo: corpo / range",              step = 0.05, group = g5)
+tClosePos = input.float(0.60, "Martelo: fechamento no range",        step = 0.05, group = g5)
+
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+closePos = rng > 0 ? (close - low) / rng : 0.5
+
+pinUp = rng >= iMinRange * atr and lowerWick >= tWickBody * body and lowerWick >= tWickAtr * atr and body <= tBodyRng * rng and closePos >= tClosePos
+pinDn = rng >= iMinRange * atr and upperWick >= tWickBody * body and upperWick >= tWickAtr * atr and body <= tBodyRng * rng and closePos <= (1 - tClosePos)
+
+// Rejeicao por reversao (Video 1): anterior contra a tendencia, corpo atual engole o corpo anterior
+engulfUp = close[1] < open[1] and close > open and close >= open[1] and open <= close[1] and body >= bodyPrev
+engulfDn = close[1] > open[1] and close < open and close <= open[1] and open >= close[1] and body >= bodyPrev
+
+// Forca de continuacao (Video 2): mesma direcao, rompe a maxima/minima anterior
+forcaTrigUp = close > open and close > high[1] and body >= iForcaAtr * atr
+forcaTrigDn = close < open and close < low[1]  and body >= iForcaAtr * atr
+
+rejUp = tMode == "Engolfo" ? engulfUp : tMode == "Forca" ? forcaTrigUp : tMode == "Martelo" ? pinUp : tMode == "Engolfo + Forca" ? (engulfUp or forcaTrigUp) : (engulfUp or forcaTrigUp or pinUp)
+rejDn = tMode == "Engolfo" ? engulfDn : tMode == "Forca" ? forcaTrigDn : tMode == "Martelo" ? pinDn : tMode == "Engolfo + Forca" ? (engulfDn or forcaTrigDn) : (engulfDn or forcaTrigDn or pinDn)
+
+janelaUp = not na(toqueUpBar) and (bar_index - toqueUpBar) <= tWin
+janelaDn = not na(toqueDnBar) and (bar_index - toqueDnBar) <= tWin
+
+// ============================================================================
+// 6. FILTROS
+// ============================================================================
+g6 = "6. Filtros"
+fM5       = input.bool(true, "Filtro M5 (janela do ciclo)", group = g6, tooltip = "Video 2: nao operar a primeira nem a ultima vela de M1 do ciclo de M5.")
+fM5From   = input.int(1, "Ciclo M5: minuto inicial permitido", minval = 0, maxval = 4, group = g6)
+fM5To     = input.int(3, "Ciclo M5: minuto final permitido",   minval = 0, maxval = 4, group = g6)
+fUmPorM5  = input.bool(true, "No maximo um sinal por ciclo M5", group = g6)
+fAnom     = input.bool(true, "Filtro de anomalia", group = g6)
+fAnomAtr  = input.float(4.0, "Anomalia: range acima de (ATR)", step = 0.5, group = g6)
+fGapPad   = input.float(0.5, "Anomalia: gap acima de (ATR)",   step = 0.1, group = g6)
+fAnomNext = input.int(1, "Anomalia bloqueia N candles seguintes", minval = 0, group = g6)
+fSpike    = input.bool(true, "Filtro de spike de volatilidade", group = g6)
+fSpikeX   = input.float(3.0, "Spike: ATR acima de x a mediana(20)", step = 0.5, group = g6)
+fSess     = input.bool(true, "Filtro de sessao", group = g6)
+fSessStr  = input.session("0935-1550", "Janela (horario de Nova York)", group = g6)
+fCooldown = input.int(2, "Cooldown apos sinal (candles)", minval = 0, group = g6)
+fMinGrade = input.string("B", "Grade minima aceita", options = ["A", "B", "C"], group = g6)
+
+m5pos = int(math.floor(time / 60000) % 5)
+m5ok = not fM5 or (m5pos >= fM5From and m5pos <= fM5To)
+
+cicloM5 = int(math.floor(time / 300000))
+var int ultimoCicloSinal = na
+m5Livre = not fUmPorM5 or na(ultimoCicloSinal) or cicloM5 != ultimoCicloSinal
+
+anomUp = rng > fAnomAtr * atr or (not na(close[1]) and math.abs(open - close[1]) > fGapPad * atr)
+var int anomBar = na
+if anomUp
+    anomBar := bar_index
+anomBlock = fAnom and not na(anomBar) and (bar_index - anomBar) <= fAnomNext
+
+atrMed = ta.median(atr, 20)
+spikeBlock = fSpike and not na(atrMed) and atrMed > 0 and atr > fSpikeX * atrMed
+
+sessOk = not fSess or not na(time(timeframe.period, fSessStr, "America/New_York"))
+
+var int ultimoSinalBar = na
+cooldownOk = na(ultimoSinalBar) or (bar_index - ultimoSinalBar) > fCooldown
+
+// ============================================================================
+// 7. GRADE DO SINAL (hipotese a ser testada, ver README)
+// ============================================================================
+gradeUp = (touchEmaUp and touchZonaUp and engulfUp) ? "A" : ((engulfUp or forcaTrigUp) and (touchEmaUp or touchZonaUp)) ? "B" : "C"
+gradeDn = (touchEmaDn and touchZonaDn and engulfDn) ? "A" : ((engulfDn or forcaTrigDn) and (touchEmaDn or touchZonaDn)) ? "B" : "C"
+
+rankUp = gradeUp == "A" ? 3 : gradeUp == "B" ? 2 : 1
+rankDn = gradeDn == "A" ? 3 : gradeDn == "B" ? 2 : 1
+minRank = fMinGrade == "A" ? 3 : fMinGrade == "B" ? 2 : 1
+
+// ============================================================================
+// 8. SINAL
+// ============================================================================
+baseLong = ready and trendUp and impulsoUp and touchUp and rejUp and janelaUp and not chaseBlockUp and m5ok and m5Livre and not anomBlock and not spikeBlock and sessOk and cooldownOk and rankUp >= minRank
+baseShort = ready and trendDn and impulsoDn and touchDn and rejDn and janelaDn and not chaseBlockDn and m5ok and m5Livre and not anomBlock and not spikeBlock and sessOk and cooldownOk and rankDn >= minRank
+
+// somente candle fechado
+longSig  = baseLong  and barstate.isconfirmed
+shortSig = baseShort and barstate.isconfirmed
+
+if longSig or shortSig
+    ultimoSinalBar := bar_index
+    ultimoCicloSinal := cicloM5
+
+// ============================================================================
+// 9. DESENHO
+// ============================================================================
+pEf = plot(ef, "EMA rapida", color = color.new(#ff9800, 0), linewidth = 2)
+pEs = plot(es, "EMA lenta",  color = color.new(#e0e0e0, 0), linewidth = 2)
+fill(pEf, pEs, color = sepOK ? color.new(#ff9800, 90) : color.new(#9e9e9e, 94), title = "Faixa das medias")
+
+plotshape(longSig,  "Gatilho CALL", shape.triangleup,   location.belowbar, color.new(#00c853, 0), size = size.small, text = "CALL")
+plotshape(shortSig, "Gatilho PUT",  shape.triangledown, location.abovebar, color.new(#d50000, 0), size = size.small, text = "PUT")
+
+if forcaUp and iZoneWin > 0
+    line.new(bar_index, impUpZone, bar_index + iZoneWin, impUpZone, color = color.new(#00c853, 30), style = line.style_dotted)
+if forcaDn and iZoneWin > 0
+    line.new(bar_index, impDnZone, bar_index + iZoneWin, impDnZone, color = color.new(#d50000, 30), style = line.style_dotted)
+
+bgcolor(sessOk ? na : color.new(#9e9e9e, 92), title = "Fora da sessao")
+bgcolor(anomBlock ? color.new(#ffeb3b, 85) : na, title = "Candle bloqueado por anomalia")
+
+alertcondition(longSig,  "FNV: gatilho CALL", "CALL {{ticker}} {{interval}} - entrada na abertura do proximo candle")
+alertcondition(shortSig, "FNV: gatilho PUT",  "PUT {{ticker}} {{interval}} - entrada na abertura do proximo candle")
+
+// ============================================================================
+// 10. PAINEL DE STATUS
+// ============================================================================
+showPanel = input.bool(true, "Mostrar painel", group = "7. Painel")
+posPanel  = input.string("top_right", "Posicao", options = ["top_right", "top_left", "bottom_right", "bottom_left", "middle_right"], group = "7. Painel")
+
+posOf(string p) =>
+    p == "top_left" ? position.top_left : p == "bottom_right" ? position.bottom_right : p == "bottom_left" ? position.bottom_left : p == "middle_right" ? position.middle_right : position.top_right
+
+var table painel = table.new(posOf(posPanel), 2, 14, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+if showPanel and barstate.islast
+    tend = trendUp ? "ALTA" : trendDn ? "BAIXA" : "NENHUMA"
+    cTend = trendUp or trendDn ? color.new(#00c853, 70) : color.new(#9e9e9e, 80)
+
+    table.cell(painel, 0, 0, "FLUXO NA VOLTA", text_color = color.new(color.white, 0), bgcolor = color.new(color.gray, 60), text_size = size.small)
+    table.cell(painel, 1, 0, longSig ? "CALL" : shortSig ? "PUT" : "-", text_color = color.new(color.white, 0), bgcolor = longSig ? color.new(#00c853, 50) : shortSig ? color.new(#d50000, 50) : color.new(color.gray, 80), text_size = size.small)
+
+    table.cell(painel, 0, 1,  "Tendencia",          text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 1,  tend,                  text_color = color.white, bgcolor = cTend, text_size = size.tiny)
+    table.cell(painel, 0, 2,  "Separacao EMA",      text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 2,  sepOK ? "OK" : "NAO",  text_color = color.white, bgcolor = sepOK ? color.new(#00c853, 70) : color.new(#d50000, 70), text_size = size.tiny)
+    table.cell(painel, 0, 3,  "Inclinacao",         text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 3,  slopeUp or slopeDn ? "OK" : "NAO", text_color = color.white, bgcolor = slopeUp or slopeDn ? color.new(#00c853, 70) : color.new(#d50000, 70), text_size = size.tiny)
+    table.cell(painel, 0, 4,  "Cruzamentos 30",     text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 4,  str.tostring(crosses30), text_color = color.white, bgcolor = crosses30 <= fMaxCross ? color.new(#00c853, 70) : color.new(#d50000, 70), text_size = size.tiny)
+    table.cell(painel, 0, 5,  "Impulso",            text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 5,  impulsoUp or impulsoDn ? "OK" : "NAO", text_color = color.white, bgcolor = impulsoUp or impulsoDn ? color.new(#00c853, 70) : color.new(#9e9e9e, 80), text_size = size.tiny)
+    table.cell(painel, 0, 6,  "Retorno",            text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 6,  touchUp or touchDn ? "TOCOU" : "aguarda", text_color = color.white, bgcolor = touchUp or touchDn ? color.new(#00c853, 70) : color.new(#9e9e9e, 80), text_size = size.tiny)
+    table.cell(painel, 0, 7,  "Gatilho",            text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 7,  rejUp or rejDn ? "OK" : "aguarda", text_color = color.white, bgcolor = rejUp or rejDn ? color.new(#00c853, 70) : color.new(#9e9e9e, 80), text_size = size.tiny)
+    table.cell(painel, 0, 8,  "Ciclo M5",           text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 8,  str.tostring(m5pos) + (m5ok ? " OK" : " BLOQ"), text_color = color.white, bgcolor = m5ok ? color.new(#00c853, 70) : color.new(#d50000, 70), text_size = size.tiny)
+    table.cell(painel, 0, 9,  "Anomalia",           text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 9,  anomBlock ? "BLOQ" : "OK", text_color = color.white, bgcolor = anomBlock ? color.new(#d50000, 70) : color.new(#00c853, 70), text_size = size.tiny)
+    table.cell(painel, 0, 10, "Spike ATR",          text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 10, spikeBlock ? "BLOQ" : "OK", text_color = color.white, bgcolor = spikeBlock ? color.new(#d50000, 70) : color.new(#00c853, 70), text_size = size.tiny)
+    table.cell(painel, 0, 11, "Sessao",             text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 11, sessOk ? "OK" : "FORA", text_color = color.white, bgcolor = sessOk ? color.new(#00c853, 70) : color.new(#9e9e9e, 80), text_size = size.tiny)
+    table.cell(painel, 0, 12, "Grade",              text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 12, gradeUp + "/" + gradeDn, text_color = color.white, bgcolor = color.new(color.gray, 80), text_size = size.tiny)
+    table.cell(painel, 0, 13, "Estado",             text_color = color.white, bgcolor = color.new(color.gray, 90), text_size = size.tiny)
+    table.cell(painel, 1, 13, longSig ? "ENTRAR CALL" : shortSig ? "ENTRAR PUT" : "sem entrada", text_color = color.white, bgcolor = longSig ? color.new(#00c853, 50) : shortSig ? color.new(#d50000, 50) : color.new(color.gray, 80), text_size = size.tiny)
